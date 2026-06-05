@@ -25,9 +25,10 @@ yarn-error.log*
 qr_*.png
 public/qr_*.png
 
-# Backups
+# Backups y temporales
 backups/
 *.bak
+*.tmp
 
 # IDE
 .vscode/
@@ -37,3 +38,6 @@ backups/
 
 # Railway
 .railway/
+
+# Docker
+.dockerignore
