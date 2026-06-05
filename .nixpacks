@@ -1,7 +1,0 @@
-{
-  "phases": {
-    "setup": {
-      "dependencies": ["chromium"]
-    }
-  }
-}
