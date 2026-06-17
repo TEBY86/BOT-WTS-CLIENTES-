@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 
 const express      = require('express');
@@ -28,15 +27,15 @@ app.use((req, res, next) => {
 app.post('/proxy-sheets', async (req, res) => {
   try {
     const { webhookUrl, ...payload } = req.body;
-    
+
     console.log('📤 Proxy a:', webhookUrl);
     console.log('📦 Payload:', JSON.stringify(payload));
-    
+
     const response = await axios.post(webhookUrl, payload, {
       headers: { 'Content-Type': 'application/json' },  // ← CAMBIADO
       timeout: 20000
     });
-    
+
     console.log('✅ Respuesta:', response.data);
     res.json(response.data);
   } catch (err) {
@@ -49,8 +48,8 @@ app.post('/proxy-sheets', async (req, res) => {
 app.get('/proxy-sheets', async (req, res) => {
   try {
     const { webhookUrl, ...params } = req.query;
-    const response = await axios.get(webhookUrl, { 
-      params, 
+    const response = await axios.get(webhookUrl, {
+      params,
       timeout: 20000,
       headers: { 'Content-Type': 'application/json' }  // ← AGREGADO
     });
@@ -126,11 +125,11 @@ function dentroDeHorario(cfg) {
   const ahora = new Date();
   const formatter = new Intl.DateTimeFormat('es-PE', {
     timeZone: tz,
-    hour: '2-digit', 
-    minute: '2-digit', 
+    hour: '2-digit',
+    minute: '2-digit',
     hour12: false
   });
-  
+
   const horaActual = formatter.format(ahora);
   const inicio = cfg.SYS_HORA_INICIO || '08:00';
   const fin    = cfg.SYS_HORA_FIN    || '22:00';
@@ -938,9 +937,57 @@ app.get('/health', (req, res) => {
   }));
   res.json({
     status:    'OK',
-    version:   '3.0',
+    version:   '3.1',
     bots:      botsSummary,
     timestamp: new Date().toISOString()
+  });
+});
+
+// ⭐ NUEVO: Recargar configuración de un bot (llamado automáticamente desde
+// Apps Script cada vez que se guarda un setConfig en la hoja de cálculo).
+// Esto es lo que faltaba: sin este endpoint, cambiar IA_PROVEEDOR en la hoja
+// no tenía ningún efecto hasta que el bot se reconectaba o el servidor se
+// reiniciaba, porque bot.config solo se refrescaba en el evento 'ready'.
+app.post('/reload-config', async (req, res) => {
+  const { botId, token } = req.body;
+
+  if (!botId) {
+    return res.json({ status: '-1', message: 'Falta botId' });
+  }
+
+  const bot = bots[botId];
+  if (!bot) {
+    log(botId, 'WARN', `Apps Script notificó cambios pero el bot no existe en este servidor`);
+    return res.json({ status: '-1', message: `Bot "${botId}" no existe en este servidor` });
+  }
+
+  // Validación mínima de token (si el bot ya tiene uno guardado)
+  if (token && bot.token && token !== bot.token) {
+    log(botId, 'WARN', `Intento de /reload-config con token inválido`);
+    return res.json({ status: '-1', message: 'Token inválido' });
+  }
+
+  const proveedorAnterior = bot.config.IA_PROVEEDOR;
+
+  await obtenerConfigDesdeSheets(botId);
+
+  const proveedorNuevo = bot.config.IA_PROVEEDOR;
+
+  log(botId, 'SUCCESS',
+    `📥 Config recargada vía webhook de Apps Script — IA_PROVEEDOR: ${proveedorAnterior} → ${proveedorNuevo}`);
+
+  // Avisar al panel en tiempo real por si lo tiene abierto
+  sseEmit(botId, 'config_reloaded', {
+    botId,
+    proveedorAnterior,
+    proveedorNuevo
+  });
+
+  res.json({
+    status:  '0',
+    message: 'Configuración recargada',
+    botId,
+    IA_PROVEEDOR: proveedorNuevo
   });
 });
 
@@ -1087,7 +1134,7 @@ app.get('/qr/:botId', (req, res) => {
   <a class="btn" href="/health" target="_blank">📊 Estado del servidor</a>
 </div>
 
-<div class="footer">WA Bot Manager PRO v3.0 · ${new Date().toLocaleString('es-PE')}</div>
+<div class="footer">WA Bot Manager PRO v3.1 · ${new Date().toLocaleString('es-PE')}</div>
 
 <script>
 const botId = '${botId}';
@@ -2235,7 +2282,7 @@ header {
     <div class="logo-mark">📱</div>
     <div>
       <div class="logo-text">WA Bot Manager PRO</div>
-      <div class="logo-ver">PANEL DE CONEXIÓN · v3.0</div>
+      <div class="logo-ver">PANEL DE CONEXIÓN · v3.1</div>
     </div>
   </div>
   <div class="header-right">
@@ -2606,6 +2653,15 @@ function abrirSSE(botId) {
     }
   });
 
+  // ⭐ NUEVO: cuando Apps Script avisa que recargó la config (p.ej. cambió IA_PROVEEDOR),
+  // este evento llega para que el panel pueda mostrar un toast informativo si lo desea.
+  sse.addEventListener('config_reloaded', e => {
+    const d = JSON.parse(e.data);
+    if (d.proveedorAnterior !== d.proveedorNuevo) {
+      toast(\`🔄 "\${botId}" cambió de IA: \${d.proveedorAnterior} → \${d.proveedorNuevo}\`);
+    }
+  });
+
   sse.addEventListener('error', e => {
     // EventSource reconecta automáticamente — solo logueamos
     console.warn('[SSE] Reconectando para', botId, e);
@@ -2843,28 +2899,28 @@ function confirmarEliminar(botId) {
 async function sincronizarBotsDesdeSheets() {
   const webhookUrl = process.env.DEFAULT_WEBHOOK_URL;
   const token = process.env.DEFAULT_TOKEN;
-  
+
   console.log('🔍 Iniciando sincronización...');
   console.log('📡 Webhook:', webhookUrl);
-  
+
   if (!webhookUrl) {
     console.log('❌ No hay DEFAULT_WEBHOOK_URL configurado');
     return;
   }
-  
+
   try {
     const url = `${webhookUrl}?action=listarBots&token=${encodeURIComponent(token || '')}`;
     console.log('🌐 Consultando:', url);
-    
+
     const res = await axios.get(url, { timeout: 15000 });
     console.log('📦 Respuesta completa:', JSON.stringify(res.data, null, 2));
-    
+
     const botsFromSheets = res.data.bots || [];
     console.log(`📋 Bots encontrados en Sheets:`, botsFromSheets);
-    
+
     for (const nombreOriginal of botsFromSheets) {
       console.log(`\n🔄 Procesando: "${nombreOriginal}"`);
-      
+
       // Limpiar el nombre
       let limpio = String(nombreOriginal)
         .toLowerCase()
@@ -2872,11 +2928,11 @@ async function sincronizarBotsDesdeSheets() {
         .replace(/[^a-z0-9]/g, '_')
         .replace(/_+/g, '_')
         .replace(/^_|_$/g, '');
-      
+
       if (!limpio) limpio = 'bot_' + Date.now();
-      
+
       console.log(`   → ID generado: "${limpio}"`);
-      
+
       if (!bots[limpio]) {
         console.log(`   ✨ Creando bot nuevo...`);
         await crearBot(limpio, webhookUrl, token || '');
@@ -2885,9 +2941,9 @@ async function sincronizarBotsDesdeSheets() {
         console.log(`   ⏭️ Ya existe: ${limpio}`);
       }
     }
-    
+
     console.log('✅ Sincronización completada');
-    
+
   } catch(err) {
     console.log('❌ ERROR en sincronización:');
     console.log('   Mensaje:', err.message);
@@ -2909,11 +2965,12 @@ app.listen(PORT, async () => {
 
   console.log('\x1b[32m');
   console.log('═══════════════════════════════════════════════════');
-  console.log('  WA Bot Manager PRO — Node.js Server v3.0');
+  console.log('  WA Bot Manager PRO — Node.js Server v3.1');
   console.log(`  Puerto   : ${PORT}`);
   console.log(`  URL      : ${PUBLIC_URL}`);
   console.log(`  Panel QR : ${PUBLIC_URL}/qr/<botId>`);
   console.log(`  Estado   : ${PUBLIC_URL}/health`);
+  console.log(`  Reload   : POST ${PUBLIC_URL}/reload-config`);
   console.log('═══════════════════════════════════════════════════');
   console.log('\x1b[0m');
 
